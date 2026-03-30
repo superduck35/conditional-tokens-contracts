@@ -95,6 +95,7 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
     Actor counterparty;
 
     bytes32 constant NULL_BYTES32 = bytes32(0);
+    address constant VM = address(uint160(uint256(keccak256("hevm cheat code"))));
 
     function onERC1155Received(
         address, address, uint256, uint256, bytes calldata
@@ -129,6 +130,14 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
     function _expectRevertOn(address target, bytes memory callData) internal {
         (bool success, ) = target.call(callData);
         require(!success, "expected revert but call succeeded");
+    }
+
+    /// @dev Call vm.expectEmit(true, true, true, true, address)
+    function _expectEmit() internal {
+        (bool ok, ) = VM.call(
+            abi.encodeWithSignature("expectEmit(bool,bool,bool,bool,address)", true, true, true, true, address(ct))
+        );
+        require(ok, "expectEmit failed");
     }
 
     // =========================================================================
@@ -742,4 +751,203 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint balAfter = token.balanceOf(address(trader));
         require(balAfter == balBefore, "balance should not change when redeeming zero");
     }
+
+    // =========================================================================
+    // Event emission tests
+    // =========================================================================
+
+    function testEmitConditionPreparation() public {
+        bytes32 questionId = bytes32(uint256(0xe0e0));
+        uint outcomeSlotCount = 3;
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+
+        _expectEmit();
+        emit ConditionPreparation(conditionId, address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+    }
+
+    function testEmitPositionSplit() public {
+        (,bytes32 conditionId) = _setupSplitMerge();
+
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01;
+        partition[1] = 0x02;
+
+        _expectEmit();
+        emit PositionSplit(address(trader), IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+    }
+
+    function testEmitPositionsMerge() public {
+        (,bytes32 conditionId) = _setupSplitMerge();
+
+        uint splitAmount = 4e18;
+        uint mergeAmount = 3e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01;
+        partition[1] = 0x02;
+
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        _expectEmit();
+        emit PositionsMerge(address(trader), IERC20(address(token)), NULL_BYTES32, conditionId, partition, mergeAmount);
+        trader.mergePositions(IERC20(address(token)), NULL_BYTES32, conditionId, partition, mergeAmount);
+    }
+
+    function testEmitConditionResolution() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupSplitMerge();
+
+        uint[] memory payouts = new uint[](2);
+        payouts[0] = 3;
+        payouts[1] = 7;
+
+        _expectEmit();
+        emit ConditionResolution(conditionId, address(oracle), questionId, 2, payouts);
+        oracle.reportPayouts(questionId, payouts);
+    }
+
+    function testEmitPayoutRedemption() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupSplitMerge();
+
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01;
+        partition[1] = 0x02;
+
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        uint[] memory payouts = new uint[](2);
+        payouts[0] = 3;
+        payouts[1] = 7;
+        oracle.reportPayouts(questionId, payouts);
+
+        // Expected payout: splitAmount * 3/10 + splitAmount * 7/10 = splitAmount
+        uint expectedPayout = splitAmount;
+
+        _expectEmit();
+        emit PayoutRedemption(address(trader), IERC20(address(token)), NULL_BYTES32, conditionId, partition, expectedPayout);
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, partition);
+    }
+
+    // =========================================================================
+    // Missing logic tests
+    // =========================================================================
+
+    function testRevertMergeAfterTransferReducesBalance() public {
+        (,bytes32 conditionId) = _setupSplitMerge();
+
+        uint splitAmount = 4e18;
+        uint transferAmount = 1e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01;
+        partition[1] = 0x02;
+
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Transfer part of position[0] to counterparty
+        bytes32 collectionId0 = ct.getCollectionId(NULL_BYTES32, conditionId, partition[0]);
+        uint positionId0 = ct.getPositionId(IERC20(address(token)), collectionId0);
+        trader.safeTransferFrom(address(trader), address(counterparty), positionId0, transferAmount, "");
+
+        // Report
+        uint[] memory payouts = new uint[](2);
+        payouts[0] = 3;
+        payouts[1] = 7;
+        oracle.reportPayouts(bytes32(uint256(0x1234)), payouts);
+
+        // Merge full splitAmount should fail — trader no longer has enough of partition[0]
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(
+                trader.mergePositions.selector,
+                address(token), NULL_BYTES32, conditionId, partition, splitAmount
+            )
+        );
+    }
+
+    function testRevertDuplicateReportDifferentValues() public {
+        (bytes32 questionId,) = _setupSplitMerge();
+
+        uint[] memory payouts = new uint[](2);
+        payouts[0] = 3;
+        payouts[1] = 7;
+        oracle.reportPayouts(questionId, payouts);
+
+        // Try to update with different values
+        uint[] memory badUpdate = new uint[](2);
+        badUpdate[0] = 0;
+        badUpdate[1] = 7;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPayouts.selector, questionId, badUpdate)
+        );
+    }
+
+    function testCombinesCollectionIds() public {
+        _setupDeepConditions();
+
+        uint collateralTokenCount = 1e19;
+        token.mint(address(trader), collateralTokenCount);
+        trader.approveToken(token, address(ct), collateralTokenCount);
+
+        // Split on condition[0]
+        uint[] memory partition1 = new uint[](2);
+        partition1[0] = 0x07; // 0b0111
+        partition1[1] = 0x08; // 0b1000
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, collateralTokenCount);
+
+        bytes32 parentCollectionId = ct.getCollectionId(NULL_BYTES32, _conditionIds[0], partition1[0]);
+
+        // Verify getCollectionId with parent produces consistent, non-trivial results
+        uint[] memory partition2 = new uint[](3);
+        partition2[0] = 0x01;
+        partition2[1] = 0x02;
+        partition2[2] = 0x0C;
+
+        for (uint i = 0; i < partition2.length; i++) {
+            bytes32 childWithParent = ct.getCollectionId(parentCollectionId, _conditionIds[1], partition2[i]);
+            bytes32 childWithoutParent = ct.getCollectionId(NULL_BYTES32, _conditionIds[1], partition2[i]);
+
+            // Combined collection ID should differ from standalone
+            require(childWithParent != childWithoutParent, "combined collection ID should differ from standalone");
+            require(childWithParent != bytes32(0), "combined collection ID should not be zero");
+        }
+    }
+
+    function testEmitPositionSplitDeep() public {
+        _setupDeepConditions();
+
+        uint collateralTokenCount = 1e19;
+        token.mint(address(trader), collateralTokenCount);
+        trader.approveToken(token, address(ct), collateralTokenCount);
+
+        uint[] memory partition1 = new uint[](2);
+        partition1[0] = 0x07;
+        partition1[1] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, collateralTokenCount);
+
+        bytes32 parentCollectionId = ct.getCollectionId(NULL_BYTES32, _conditionIds[0], partition1[0]);
+        uint deepSplitAmount = 4e18;
+
+        uint[] memory partition2 = new uint[](3);
+        partition2[0] = 0x01;
+        partition2[1] = 0x02;
+        partition2[2] = 0x0C;
+
+        _expectEmit();
+        emit PositionSplit(address(trader), IERC20(address(token)), parentCollectionId, _conditionIds[1], partition2, deepSplitAmount);
+        trader.splitPosition(IERC20(address(token)), parentCollectionId, _conditionIds[1], partition2, deepSplitAmount);
+    }
+
+    // =========================================================================
+    // Event declarations (for expectEmit)
+    // =========================================================================
+
+    event ConditionPreparation(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount);
+    event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount, uint[] payoutNumerators);
+    event PositionSplit(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
+    event PositionsMerge(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
+    event PayoutRedemption(address indexed redeemer, IERC20 indexed collateralToken, bytes32 indexed parentCollectionId, bytes32 conditionId, uint[] indexSets, uint payout);
 }
