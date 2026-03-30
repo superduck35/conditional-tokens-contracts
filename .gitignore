@@ -147,3 +147,7 @@ truffle-local.js
 Gemfile
 Gemfile.lock
 _site/
+
+# Foundry
+out/
+cache/
