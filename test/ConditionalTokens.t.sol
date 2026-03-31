@@ -942,6 +942,69 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
     }
 
     // =========================================================================
+    // ID cross-validation tests
+    // Reference values computed off-chain via utils/id-helpers.js
+    // These verify the Solidity implementation matches the JS reference.
+    // =========================================================================
+
+    // Fixed oracle address for reference tests (not an Actor — just a raw address)
+    address constant REF_ORACLE = address(0x1);
+    address constant REF_TOKEN = address(0x99);
+
+    function testConditionIdMatchesOffChainReference() public {
+        // Vector 1: 256 outcomes
+        bytes32 qid1 = bytes32(uint256(0x0100000000000000000000000000000000000000000000000000000000000000));
+        // Reverse because Solidity bytes32 is big-endian
+        qid1 = 0x0100000000000000000000000000000000000000000000000000000000000000;
+        bytes32 expected1 = 0xacffa9a9ff3fa8e5e92ce5138e4a2ba22b98eee9d0dcd298d6f75a6bd5ec4404;
+        require(ct.getConditionId(REF_ORACLE, qid1, 2) == expected1, "conditionId mismatch (2 outcomes)");
+
+        // Vector 2: 256 outcomes
+        bytes32 qid2 = 0x000000000000000000000000000000000000000000000000000000000000cafe;
+        bytes32 expected2 = 0x20cc103253ccbcb4db08dbe88b5f68be8471d9663db82d56450521a9de762144;
+        require(ct.getConditionId(REF_ORACLE, qid2, 256) == expected2, "conditionId mismatch (256 outcomes)");
+    }
+
+    function testCollectionIdMatchesOffChainReference() public {
+        bytes32 conditionId = 0xacffa9a9ff3fa8e5e92ce5138e4a2ba22b98eee9d0dcd298d6f75a6bd5ec4404;
+
+        bytes32 expected_01 = 0x6f2dd2e938aa3203c5862bd1af73958a34c15979bb13cda4a6d108c23c459444;
+        bytes32 expected_02 = 0x6f031fa4e3efa0a26f95469ddc4985109837ef568b60f990a768c653c46d0636;
+
+        require(ct.getCollectionId(NULL_BYTES32, conditionId, 1) == expected_01, "collectionId(1) mismatch");
+        require(ct.getCollectionId(NULL_BYTES32, conditionId, 2) == expected_02, "collectionId(2) mismatch");
+    }
+
+    function testPositionIdMatchesOffChainReference() public {
+        bytes32 collId_01 = 0x6f2dd2e938aa3203c5862bd1af73958a34c15979bb13cda4a6d108c23c459444;
+        bytes32 collId_02 = 0x6f031fa4e3efa0a26f95469ddc4985109837ef568b60f990a768c653c46d0636;
+
+        bytes32 expected_pos1 = 0xca96f0128ed7435e65cad8aed3a98cb19c13cdb7fb5c86cea9561588e9eb7501;
+        bytes32 expected_pos2 = 0x90e174e5adb40b2db618d72107d5a3ff8d3159a1d345e0aa2cac1caa24f5c839;
+
+        require(ct.getPositionId(IERC20(REF_TOKEN), collId_01) == uint256(expected_pos1), "positionId(1) mismatch");
+        require(ct.getPositionId(IERC20(REF_TOKEN), collId_02) == uint256(expected_pos2), "positionId(2) mismatch");
+    }
+
+    function testCombinedCollectionIdMatchesOffChainReference() public {
+        // Parent: conditionId3 with indexSet 7
+        bytes32 conditionId3 = 0xcc4d53c710a5b110c6d3a439729bd6d6063c12328e412d58e1da3489ff3f5b3c;
+        bytes32 parentCollId = 0x6e551715d0a681c1d8ee93161b44ebc8073f59f73cb2f08fb7316332c014352e;
+
+        // Verify the parent collectionId itself
+        require(ct.getCollectionId(NULL_BYTES32, conditionId3, 7) == parentCollId, "parent collectionId mismatch");
+
+        // Child: conditionId4 with indexSet 1, combined with parent
+        bytes32 conditionId4 = 0xe35d7e4183eea46617ab4a4586fb4cdeb86aa62bf0574f4733bba6503bed47a8;
+        bytes32 expectedCombined = 0x6b3e0f684572bb8adcc379c630e5cb0ee9c308ead99cc8f003840192cec639a5;
+
+        require(
+            ct.getCollectionId(parentCollId, conditionId4, 1) == expectedCombined,
+            "combined collectionId mismatch"
+        );
+    }
+
+    // =========================================================================
     // Event declarations (for expectEmit)
     // =========================================================================
 
