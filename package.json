@@ -4,7 +4,14 @@
   "description": "Collection of smart contracts for the conditional tokens",
   "scripts": {
     "build": "forge build",
-    "test": "forge test"
+    "test": "forge test -vv",
+    "test:gas": "forge test --gas-report",
+    "test:trace": "forge test -vvvv",
+    "test:match": "forge test --match-test",
+    "test:debug": "forge test --debug",
+    "lint": "eslint .",
+    "lint-contracts": "solium -d contracts/",
+    "prepack": "eslint . && npm run lint-contracts && forge build"
   },
   "keywords": [
     "Ethereum",
@@ -18,7 +25,15 @@
   "dependencies": {
     "openzeppelin-solidity": "2.3.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "eslint": "^6.3.0",
+    "eslint-config-prettier": "^6.3.0",
+    "eslint-plugin-prettier": "^3.1.0",
+    "ethlint": "^1.2.4",
+    "husky": "^4.0.2",
+    "lint-staged": "^9.2.5",
+    "prettier": "1.19.1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gnosis/conditional-tokens-contracts.git"
@@ -26,5 +41,16 @@
   "bugs": {
     "url": "https://github.com/gnosis/conditional-tokens-contracts/issues"
   },
-  "homepage": "https://github.com/gnosis/conditional-tokens-contracts#readme"
+  "homepage": "https://github.com/gnosis/conditional-tokens-contracts#readme",
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged"
+    }
+  },
+  "lint-staged": {
+    "*.js": [
+      "eslint --fix",
+      "git add"
+    ]
+  }
 }
