@@ -1,7 +1,13 @@
 language: node_js
 node_js:
 - lts/*
+before_install:
+- curl -L https://foundry.paradigm.xyz | bash
+- foundryup
+install:
+- npm install
 script:
 - npm run lint
-- npm test
-- npx codechecks
+- npm run lint-contracts
+- forge build
+- forge test -vv
