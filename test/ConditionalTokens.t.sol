@@ -1,6 +1,7 @@
 pragma solidity ^0.5.1;
 
 import { ConditionalTokens } from "../contracts/ConditionalTokens.sol";
+import { WrappedPositionToken } from "../contracts/WrappedPositionToken.sol";
 import { IERC20 } from "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
 import { ERC20Mintable } from "openzeppelin-solidity/contracts/token/ERC20/ERC20Mintable.sol";
 import { ERC1155TokenReceiver } from "../contracts/ERC1155/ERC1155TokenReceiver.sol";
@@ -57,6 +58,34 @@ contract Actor is ERC1155TokenReceiver {
 
     function approveToken(ERC20Mintable token, address spender, uint amount) external {
         token.approve(spender, amount);
+    }
+
+    function wrap(uint256 positionId, uint256 amount) external returns (address) {
+        return ct.wrap(address(this), positionId, amount);
+    }
+
+    function wrapFor(address from, uint256 positionId, uint256 amount) external returns (address) {
+        return ct.wrap(from, positionId, amount);
+    }
+
+    function setApprovalForAll(address operator, bool approved) external {
+        ct.setApprovalForAll(operator, approved);
+    }
+
+    function unwrapPosition(WrappedPositionToken wrapper, uint256 amount) external {
+        wrapper.unwrap(address(this), amount);
+    }
+
+    function unwrapPositionFor(WrappedPositionToken wrapper, address from, uint256 amount) external {
+        wrapper.unwrap(from, amount);
+    }
+
+    function approveERC20(IERC20 erc20Token, address spender, uint256 amount) external {
+        erc20Token.approve(spender, amount);
+    }
+
+    function transferERC20(IERC20 erc20Token, address to, uint256 amount) external {
+        erc20Token.transfer(to, amount);
     }
 
     function safeTransferFrom(
@@ -1738,12 +1767,382 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
     }
 
     // =========================================================================
+    // ERC20 Wrapper tests
+    // =========================================================================
+
+    /// @dev Helper: prepare condition, split, and return a position ID for wrapping tests
+    function _setupWrapPosition() internal returns (bytes32 conditionId, uint positionId) {
+        bytes32 questionId = bytes32(uint256(0xA7A9));
+        uint outcomeSlotCount = 2;
+        conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 10e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01; // A
+        partition[1] = 0x02; // B
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, funding);
+
+        bytes32 collectionId = ct.getCollectionId(NULL_BYTES32, conditionId, 0x01);
+        positionId = ct.getPositionId(IERC20(address(token)), collectionId);
+    }
+
+    function testWrapBasic() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint wrapAmount = 4e18;
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+
+        address wrapper = trader.wrap(positionId, wrapAmount);
+
+        // ERC1155 balance decreased
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before - wrapAmount,
+            "ERC1155 balance should decrease"
+        );
+        // Wrapper holds the ERC1155
+        require(
+            ct.balanceOf(wrapper, positionId) == wrapAmount,
+            "wrapper should hold ERC1155 tokens"
+        );
+        // ERC20 minted to trader
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == wrapAmount,
+            "ERC20 balance should equal wrap amount"
+        );
+        // Total supply correct
+        require(
+            WrappedPositionToken(wrapper).totalSupply() == wrapAmount,
+            "ERC20 total supply should equal wrap amount"
+        );
+    }
+
+    function testWrapDeterministicAddress() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Pre-compute address before wrapping
+        address predicted = ct.getWrappedTokenAddress(positionId);
+
+        // Wrap deploys the wrapper
+        address actual = trader.wrap(positionId, 1e18);
+
+        require(predicted == actual, "wrapper address should be deterministic");
+
+        // Verify wrappedTokens mapping
+        require(ct.wrappedTokens(positionId) == actual, "wrappedTokens mapping should be set");
+    }
+
+    function testWrapTwiceReusesSameWrapper() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper1 = trader.wrap(positionId, 3e18);
+        address wrapper2 = trader.wrap(positionId, 2e18);
+
+        require(wrapper1 == wrapper2, "should reuse same wrapper");
+        require(
+            WrappedPositionToken(wrapper1).balanceOf(address(trader)) == 5e18,
+            "ERC20 balance should accumulate"
+        );
+    }
+
+    function testUnwrapBasic() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint wrapAmount = 6e18;
+        uint unwrapAmount = 4e18;
+        address wrapper = trader.wrap(positionId, wrapAmount);
+
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+        trader.unwrapPosition(WrappedPositionToken(wrapper), unwrapAmount);
+
+        // ERC1155 returned
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before + unwrapAmount,
+            "ERC1155 should be returned on unwrap"
+        );
+        // ERC20 burned
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == wrapAmount - unwrapAmount,
+            "ERC20 should be burned on unwrap"
+        );
+        // Wrapper still holds remainder
+        require(
+            ct.balanceOf(wrapper, positionId) == wrapAmount - unwrapAmount,
+            "wrapper should hold remaining ERC1155"
+        );
+    }
+
+    function testWrapUnwrapFullRoundTrip() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 10e18;
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+
+        address wrapper = trader.wrap(positionId, amount);
+        trader.unwrapPosition(WrappedPositionToken(wrapper), amount);
+
+        // Should be fully restored
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before,
+            "ERC1155 should be fully restored"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == 0,
+            "ERC20 should be zero after full unwrap"
+        );
+        require(
+            WrappedPositionToken(wrapper).totalSupply() == 0,
+            "total supply should be zero"
+        );
+    }
+
+    function testWrappedTokenIsTransferable() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 5e18;
+        address wrapper = trader.wrap(positionId, amount);
+
+        // Transfer ERC20 to counterparty
+        uint transferAmount = 2e18;
+        trader.transferERC20(IERC20(wrapper), address(counterparty), transferAmount);
+
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount - transferAmount,
+            "trader ERC20 balance wrong after transfer"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(counterparty)) == transferAmount,
+            "counterparty should receive ERC20"
+        );
+
+        // Counterparty can unwrap
+        counterparty.unwrapPosition(WrappedPositionToken(wrapper), transferAmount);
+        require(
+            ct.balanceOf(address(counterparty), positionId) == transferAmount,
+            "counterparty should receive ERC1155 on unwrap"
+        );
+    }
+
+    function testWrapDirectTransfer() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // First deploy the wrapper
+        address wrapper = trader.wrap(positionId, 1e18);
+
+        // Now do a direct safeTransferFrom to the wrapper (alternative wrap path)
+        uint directAmount = 3e18;
+        trader.safeTransferFrom(address(trader), wrapper, positionId, directAmount, "");
+
+        // Should have minted ERC20 to trader via onERC1155Received
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == 1e18 + directAmount,
+            "direct transfer should also mint ERC20"
+        );
+    }
+
+    function testWrapDifferentPositionsSeparateWrappers() public {
+        bytes32 questionId = bytes32(uint256(0xD1FF));
+        uint outcomeSlotCount = 3;
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 6e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+
+        uint[] memory partition = new uint[](3);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, funding);
+
+        bytes32 collIdA = ct.getCollectionId(NULL_BYTES32, conditionId, 0x01);
+        bytes32 collIdB = ct.getCollectionId(NULL_BYTES32, conditionId, 0x02);
+        uint posIdA = ct.getPositionId(IERC20(address(token)), collIdA);
+        uint posIdB = ct.getPositionId(IERC20(address(token)), collIdB);
+
+        address wrapperA = trader.wrap(posIdA, 2e18);
+        address wrapperB = trader.wrap(posIdB, 3e18);
+
+        require(wrapperA != wrapperB, "different positions should get different wrappers");
+        require(WrappedPositionToken(wrapperA).positionId() == posIdA, "wrapper A positionId wrong");
+        require(WrappedPositionToken(wrapperB).positionId() == posIdB, "wrapper B positionId wrong");
+    }
+
+    function testRevertWrapInsufficientBalance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Trader has 10e18 of position A. Try to wrap 11e18.
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.wrap.selector, positionId, uint(11e18))
+        );
+    }
+
+    function testRevertUnwrapExceedsBalance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 5e18);
+
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.unwrapPosition.selector, wrapper, uint(6e18))
+        );
+    }
+
+    function testRevertDirectTransferWrongPositionId() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Deploy wrapper for positionId A
+        address wrapper = trader.wrap(positionId, 1e18);
+
+        // Get position B
+        bytes32 questionId = bytes32(uint256(0xA7A9));
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, 2);
+        bytes32 collIdB = ct.getCollectionId(NULL_BYTES32, conditionId, 0x02);
+        uint posIdB = ct.getPositionId(IERC20(address(token)), collIdB);
+
+        // Try to send position B tokens to wrapper for position A — should fail
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(
+                trader.safeTransferFrom.selector,
+                address(trader), wrapper, posIdB, uint(1e18), ""
+            )
+        );
+    }
+
+    function testWrapperMetadata() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 1e18);
+        WrappedPositionToken wpt = WrappedPositionToken(wrapper);
+
+        // Check ERC20 metadata
+        require(wpt.decimals() == 18, "decimals should be 18");
+        require(bytes(wpt.name()).length > 0, "name should not be empty");
+        require(bytes(wpt.symbol()).length > 0, "symbol should not be empty");
+        require(address(wpt.conditionalTokens()) == address(ct), "CT address should match");
+        require(wpt.positionId() == positionId, "positionId should match");
+    }
+
+    function testUnderlyingBalanceMatchesTotalSupply() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 7e18);
+        WrappedPositionToken wpt = WrappedPositionToken(wrapper);
+
+        require(wpt.underlyingBalance() == wpt.totalSupply(), "underlying should match total supply after wrap");
+
+        trader.unwrapPosition(wpt, 3e18);
+        require(wpt.underlyingBalance() == wpt.totalSupply(), "underlying should match total supply after unwrap");
+        require(wpt.underlyingBalance() == 4e18, "underlying should be 4e18");
+    }
+
+    function testWrapOnBehalfAsOperator() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Trader approves counterparty as operator
+        trader.setApprovalForAll(address(counterparty), true);
+
+        uint amount = 4e18;
+        uint traderBefore = ct.balanceOf(address(trader), positionId);
+
+        // Counterparty wraps trader's tokens
+        address wrapper = counterparty.wrapFor(address(trader), positionId, amount);
+
+        // ERC1155 burned from trader
+        require(
+            ct.balanceOf(address(trader), positionId) == traderBefore - amount,
+            "ERC1155 should be burned from trader"
+        );
+        // ERC20 minted to trader (not counterparty)
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount,
+            "ERC20 should be minted to token owner"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(counterparty)) == 0,
+            "operator should not receive ERC20"
+        );
+    }
+
+    function testRevertWrapOnBehalfWithoutApproval() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Counterparty tries to wrap trader's tokens without approval
+        _expectRevertOn(
+            address(counterparty),
+            abi.encodeWithSelector(counterparty.wrapFor.selector, address(trader), positionId, uint(1e18))
+        );
+    }
+
+    function testUnwrapOnBehalfWithAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 5e18;
+        address wrapper = trader.wrap(positionId, amount);
+
+        // Trader approves counterparty to spend ERC20
+        uint unwrapAmount = 3e18;
+        trader.approveERC20(IERC20(wrapper), address(counterparty), unwrapAmount);
+
+        // Counterparty unwraps on trader's behalf
+        uint traderERC1155Before = ct.balanceOf(address(trader), positionId);
+        counterparty.unwrapPositionFor(WrappedPositionToken(wrapper), address(trader), unwrapAmount);
+
+        // ERC1155 returned to trader (not counterparty)
+        require(
+            ct.balanceOf(address(trader), positionId) == traderERC1155Before + unwrapAmount,
+            "ERC1155 should go to token owner"
+        );
+        require(
+            ct.balanceOf(address(counterparty), positionId) == 0,
+            "operator should not receive ERC1155"
+        );
+        // ERC20 burned from trader
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount - unwrapAmount,
+            "ERC20 should be burned from owner"
+        );
+        // Allowance consumed
+        require(
+            WrappedPositionToken(wrapper).allowance(address(trader), address(counterparty)) == 0,
+            "allowance should be consumed"
+        );
+    }
+
+    function testRevertUnwrapOnBehalfWithoutAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 5e18);
+
+        // Counterparty tries to unwrap trader's tokens without ERC20 approval
+        _expectRevertOn(
+            address(counterparty),
+            abi.encodeWithSelector(counterparty.unwrapPositionFor.selector, wrapper, address(trader), uint(1e18))
+        );
+    }
+
+    function testEmitWrappedTokenCreated() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address predicted = ct.getWrappedTokenAddress(positionId);
+
+        _expectEmit();
+        emit WrappedTokenCreated(positionId, predicted);
+        trader.wrap(positionId, 1e18);
+    }
+
+    // =========================================================================
     // Event declarations (for expectEmit)
     // =========================================================================
 
     event ConditionPreparation(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount);
     event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount, uint[] payoutNumerators);
     event PartialConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount, uint settledOutcomesBitmask);
+    event WrappedTokenCreated(uint256 indexed positionId, address indexed wrappedToken);
     event PositionSplit(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
     event PositionsMerge(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
     event PayoutRedemption(address indexed redeemer, IERC20 indexed collateralToken, bytes32 indexed parentCollectionId, bytes32 conditionId, uint[] indexSets, uint payout);

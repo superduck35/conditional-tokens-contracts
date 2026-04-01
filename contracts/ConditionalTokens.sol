@@ -2,8 +2,12 @@ pragma solidity ^0.5.1;
 import { IERC20 } from "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
 import { ERC1155 } from "./ERC1155/ERC1155.sol";
 import { CTHelpers } from "./CTHelpers.sol";
+import { WrappedPositionToken } from "./WrappedPositionToken.sol";
 
 contract ConditionalTokens is ERC1155 {
+
+    /// @dev Emitted when a wrapped ERC20 token is deployed for a position.
+    event WrappedTokenCreated(uint256 indexed positionId, address indexed wrappedToken);
 
     /// @dev Emitted upon the successful preparation of a condition.
     /// @param conditionId The condition's ID. This ID may be derived from the other three parameters via ``keccak256(abi.encodePacked(oracle, questionId, outcomeSlotCount))``.
@@ -70,6 +74,9 @@ contract ConditionalTokens is ERC1155 {
     mapping(bytes32 => uint) public payoutDenominator;
     /// Bitmask tracking which outcome slots have been individually settled (via partial or full resolution).
     mapping(bytes32 => uint) public settledOutcomes;
+
+    /// @dev Maps each ERC1155 position ID to its ERC20 wrapper contract address (0 if not yet deployed).
+    mapping(uint256 => address) public wrappedTokens;
 
     /// @dev This function prepares a condition by initializing a payout vector associated with the condition.
     /// @param oracle The account assigned to report the result for the prepared condition.
@@ -356,6 +363,64 @@ contract ConditionalTokens is ERC1155 {
             }
         }
         emit PayoutRedemption(msg.sender, collateralToken, parentCollectionId, conditionId, indexSets, totalPayout);
+    }
+
+    // =========================================================================
+    // ERC20 wrapping
+    // =========================================================================
+
+    /// @dev Wraps ERC1155 position tokens into an ERC20 token. Deploys the ERC20 wrapper
+    ///      on first use via CREATE2 (deterministic address). The ERC1155 tokens are burned
+    ///      from `from` and the ERC20 is minted to `from`. Caller must be `from` or an
+    ///      approved operator (same trust model as safeTransferFrom).
+    /// @param from The account whose ERC1155 tokens will be wrapped.
+    /// @param positionId The ERC1155 token ID of the position to wrap.
+    /// @param amount The amount of position tokens to wrap.
+    /// @return wrapper The address of the ERC20 wrapper contract.
+    function wrap(address from, uint256 positionId, uint256 amount) external returns (address wrapper) {
+        require(
+            from == msg.sender || this.isApprovedForAll(from, msg.sender),
+            "wrap: need operator approval"
+        );
+        wrapper = _ensureWrapper(positionId);
+        _burn(from, positionId, amount);
+        _mint(wrapper, positionId, amount, abi.encode(from));
+    }
+
+    /// @dev Returns the ERC20 wrapper address for a position ID. Returns the deterministic
+    ///      CREATE2 address regardless of whether the wrapper has been deployed yet.
+    /// @param positionId The ERC1155 token ID.
+    /// @return The deterministic wrapper address.
+    function getWrappedTokenAddress(uint256 positionId) public view returns (address) {
+        bytes memory bytecode = abi.encodePacked(
+            type(WrappedPositionToken).creationCode,
+            abi.encode(address(this), positionId)
+        );
+        bytes32 hash = keccak256(abi.encodePacked(
+            bytes1(0xff),
+            address(this),
+            bytes32(positionId),
+            keccak256(bytecode)
+        ));
+        return address(uint160(uint256(hash)));
+    }
+
+    /// @dev Deploys the ERC20 wrapper for a position if it doesn't exist yet.
+    function _ensureWrapper(uint256 positionId) internal returns (address wrapper) {
+        wrapper = wrappedTokens[positionId];
+        if (wrapper != address(0)) return wrapper;
+
+        bytes memory bytecode = abi.encodePacked(
+            type(WrappedPositionToken).creationCode,
+            abi.encode(address(this), positionId)
+        );
+        bytes32 salt = bytes32(positionId);
+        assembly {
+            wrapper := create2(0, add(bytecode, 0x20), mload(bytecode), salt)
+        }
+        require(wrapper != address(0), "wrapper deployment failed");
+        wrappedTokens[positionId] = wrapper;
+        emit WrappedTokenCreated(positionId, wrapper);
     }
 
     /// @dev Gets the outcome slot count of a condition.
