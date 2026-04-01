@@ -68,12 +68,19 @@ contract WrappedPositionToken is ERC20, ERC20Detailed {
         revert("batch transfers not supported");
     }
 
-    /// @dev Burns ERC20 and returns the underlying ERC1155 position tokens to the caller.
+    /// @dev Burns ERC20 and returns the underlying ERC1155 position tokens.
+    ///      If caller is not `from`, caller must have ERC20 allowance (standard approve pattern).
+    ///      ERC1155 tokens are returned to `from`.
+    /// @param from The account whose ERC20 tokens will be burned.
     /// @param _amount Amount of wrapped tokens to unwrap.
-    function unwrap(uint256 _amount) external {
-        _burn(msg.sender, _amount);
-        conditionalTokens.safeTransferFrom(address(this), msg.sender, positionId, _amount, "");
-        emit Withdrawal(msg.sender, _amount);
+    function unwrap(address from, uint256 _amount) external {
+        if (from == msg.sender) {
+            _burn(from, _amount);
+        } else {
+            _burnFrom(from, _amount);
+        }
+        conditionalTokens.safeTransferFrom(address(this), from, positionId, _amount, "");
+        emit Withdrawal(from, _amount);
     }
 
     /// @dev Returns the total ERC1155 tokens held by this wrapper (should equal totalSupply).

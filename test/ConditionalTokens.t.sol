@@ -69,7 +69,15 @@ contract Actor is ERC1155TokenReceiver {
     }
 
     function unwrapPosition(WrappedPositionToken wrapper, uint256 amount) external {
-        wrapper.unwrap(amount);
+        wrapper.unwrap(address(this), amount);
+    }
+
+    function unwrapPositionFor(WrappedPositionToken wrapper, address from, uint256 amount) external {
+        wrapper.unwrap(from, amount);
+    }
+
+    function approveERC20(IERC20 erc20Token, address spender, uint256 amount) external {
+        erc20Token.approve(spender, amount);
     }
 
     function transferERC20(IERC20 erc20Token, address to, uint256 amount) external {
@@ -1334,6 +1342,53 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         _expectRevertOn(
             address(counterparty),
             abi.encodeWithSelector(counterparty.wrapFor.selector, address(trader), positionId, uint(1e18))
+        );
+    }
+
+    function testUnwrapOnBehalfWithAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 5e18;
+        address wrapper = trader.wrap(positionId, amount);
+
+        // Trader approves counterparty to spend ERC20
+        uint unwrapAmount = 3e18;
+        trader.approveERC20(IERC20(wrapper), address(counterparty), unwrapAmount);
+
+        // Counterparty unwraps on trader's behalf
+        uint traderERC1155Before = ct.balanceOf(address(trader), positionId);
+        counterparty.unwrapPositionFor(WrappedPositionToken(wrapper), address(trader), unwrapAmount);
+
+        // ERC1155 returned to trader (not counterparty)
+        require(
+            ct.balanceOf(address(trader), positionId) == traderERC1155Before + unwrapAmount,
+            "ERC1155 should go to token owner"
+        );
+        require(
+            ct.balanceOf(address(counterparty), positionId) == 0,
+            "operator should not receive ERC1155"
+        );
+        // ERC20 burned from trader
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount - unwrapAmount,
+            "ERC20 should be burned from owner"
+        );
+        // Allowance consumed
+        require(
+            WrappedPositionToken(wrapper).allowance(address(trader), address(counterparty)) == 0,
+            "allowance should be consumed"
+        );
+    }
+
+    function testRevertUnwrapOnBehalfWithoutAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 5e18);
+
+        // Counterparty tries to unwrap trader's tokens without ERC20 approval
+        _expectRevertOn(
+            address(counterparty),
+            abi.encodeWithSelector(counterparty.unwrapPositionFor.selector, wrapper, address(trader), uint(1e18))
         );
     }
 
