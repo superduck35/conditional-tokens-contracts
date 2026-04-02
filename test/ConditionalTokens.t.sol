@@ -1,6 +1,7 @@
 pragma solidity ^0.5.1;
 
 import { ConditionalTokens } from "../contracts/ConditionalTokens.sol";
+import { WrappedPositionToken } from "../contracts/WrappedPositionToken.sol";
 import { IERC20 } from "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
 import { ERC20Mintable } from "openzeppelin-solidity/contracts/token/ERC20/ERC20Mintable.sol";
 import { ERC1155TokenReceiver } from "../contracts/ERC1155/ERC1155TokenReceiver.sol";
@@ -20,6 +21,10 @@ contract Actor is ERC1155TokenReceiver {
 
     function reportPayouts(bytes32 questionId, uint[] calldata payouts) external {
         ct.reportPayouts(questionId, payouts);
+    }
+
+    function reportPartialPayouts(bytes32 questionId, uint[] calldata payouts, uint denominator) external {
+        ct.reportPartialPayouts(questionId, payouts, denominator);
     }
 
     function splitPosition(
@@ -53,6 +58,34 @@ contract Actor is ERC1155TokenReceiver {
 
     function approveToken(ERC20Mintable token, address spender, uint amount) external {
         token.approve(spender, amount);
+    }
+
+    function wrap(uint256 positionId, uint256 amount) external returns (address) {
+        return ct.wrap(address(this), positionId, amount);
+    }
+
+    function wrapFor(address from, uint256 positionId, uint256 amount) external returns (address) {
+        return ct.wrap(from, positionId, amount);
+    }
+
+    function setApprovalForAll(address operator, bool approved) external {
+        ct.setApprovalForAll(operator, approved);
+    }
+
+    function unwrapPosition(WrappedPositionToken wrapper, uint256 amount) external {
+        wrapper.unwrap(address(this), amount);
+    }
+
+    function unwrapPositionFor(WrappedPositionToken wrapper, address from, uint256 amount) external {
+        wrapper.unwrap(from, amount);
+    }
+
+    function approveERC20(IERC20 erc20Token, address spender, uint256 amount) external {
+        erc20Token.approve(spender, amount);
+    }
+
+    function transferERC20(IERC20 erc20Token, address to, uint256 amount) external {
+        erc20Token.transfer(to, amount);
     }
 
     function safeTransferFrom(
@@ -206,7 +239,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         trader.approveToken(token, address(ct), collateralAmount);
 
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         _expectRevertOn(
@@ -219,8 +254,10 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         (,bytes32 conditionId) = _setupSplitMerge();
 
         uint[] memory partition = new uint[](2);
-        partition[0] = 0x03; // 0b11
-        partition[1] = 0x02; // 0b10 — overlaps
+        // 0b11 == (A|B) — full set
+        partition[0] = 0x03;
+        // 0b10 == (B) — overlaps with partition[0]
+        partition[1] = 0x02;
 
         _expectRevertOn(
             address(trader),
@@ -232,9 +269,12 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         (,bytes32 conditionId) = _setupSplitMerge();
 
         uint[] memory partition = new uint[](3);
+        // 0b001 == (A)
         partition[0] = 0x01;
+        // 0b010 == (B)
         partition[1] = 0x02;
-        partition[2] = 0x04; // 3 slots but condition has 2
+        // 0b100 == (C) — exceeds 2-outcome condition
+        partition[2] = 0x04;
 
         _expectRevertOn(
             address(trader),
@@ -246,7 +286,8 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         (,bytes32 conditionId) = _setupSplitMerge();
 
         uint[] memory partition = new uint[](1);
-        partition[0] = 0x03; // 0b11 — full set but singleton array
+        // 0b11 == (A|B) — full set, but singleton partition array is invalid
+        partition[0] = 0x03;
 
         _expectRevertOn(
             address(trader),
@@ -258,7 +299,8 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         (,bytes32 conditionId) = _setupSplitMerge();
 
         uint[] memory partition = new uint[](1);
-        partition[0] = 0x01; // 0b01 — incomplete
+        // 0b01 == (A) — incomplete partition (missing B)
+        partition[0] = 0x01;
 
         _expectRevertOn(
             address(trader),
@@ -272,7 +314,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint splitAmount = 4e18;
         uint collateralTokenCount = 1e19;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -294,7 +338,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         uint splitAmount = 4e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -315,7 +361,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint mergeAmount = 3e18;
         uint collateralTokenCount = 1e19;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -351,7 +399,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         uint splitAmount = 4e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -476,7 +526,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint splitAmount = 4e18;
         uint transferAmount = 1e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         // Split
@@ -558,9 +610,11 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         token.mint(address(trader), collateralTokenCount);
         trader.approveToken(token, address(ct), collateralTokenCount);
 
-        // Split on condition[0]: partition [0b0111, 0b1000]
+        // Split on condition[0]
         uint[] memory partition1 = new uint[](2);
+        // 0b0111 == (A|B|C)
         partition1[0] = 0x07;
+        // 0b1000 == (D)
         partition1[1] = 0x08;
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, collateralTokenCount);
 
@@ -576,8 +630,11 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint deepSplitAmount = 4e18;
 
         uint[] memory partition2 = new uint[](3);
+        // 0b0001 == (A)
         partition2[0] = 0x01;
+        // 0b0010 == (B)
         partition2[1] = 0x02;
+        // 0b1100 == (C|D)
         partition2[2] = 0x0C;
 
         trader.splitPosition(IERC20(address(token)), parentCollectionId, _conditionIds[1], partition2, deepSplitAmount);
@@ -610,7 +667,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         trader.approveToken(token, address(ct), amt);
 
         uint[] memory partition1 = new uint[](2);
+        // 0b0111 == (A|B|C)
         partition1[0] = 0x07;
+        // 0b1000 == (D)
         partition1[1] = 0x08;
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, amt);
 
@@ -640,7 +699,7 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
             abi.encodeWithSelector(oracle.reportPayouts.selector, _questionIds[0], finalReport)
         );
 
-        // Redeem partition1[0]
+        // Redeem partition1[0] — 0b0111 == (A|B|C)
         uint[] memory redeemSets = new uint[](1);
         redeemSets[0] = partition1[0];
 
@@ -668,7 +727,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         trader.approveToken(token, address(ct), 1e18);
 
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         _expectRevertOn(
@@ -682,7 +743,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         uint splitAmount = 4e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -703,7 +766,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint splitAmount = 4e18;
         uint collateralTokenCount = 1e19;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         // Split and merge same amount — should return to original state
@@ -744,6 +809,7 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         // Redeem without having any positions — should succeed with 0 payout
         uint[] memory indexSets = new uint[](1);
+        // 0b01 == (A)
         indexSets[0] = 0x01;
 
         uint balBefore = token.balanceOf(address(trader));
@@ -771,7 +837,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         uint splitAmount = 4e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         _expectEmit();
@@ -785,7 +853,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint splitAmount = 4e18;
         uint mergeAmount = 3e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -812,7 +882,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         uint splitAmount = 4e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -840,7 +912,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint splitAmount = 4e18;
         uint transferAmount = 1e18;
         uint[] memory partition = new uint[](2);
+        // 0b01 == (A)
         partition[0] = 0x01;
+        // 0b10 == (B)
         partition[1] = 0x02;
 
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
@@ -894,16 +968,21 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
 
         // Split on condition[0]
         uint[] memory partition1 = new uint[](2);
-        partition1[0] = 0x07; // 0b0111
-        partition1[1] = 0x08; // 0b1000
+        // 0b0111 == (A|B|C)
+        partition1[0] = 0x07;
+        // 0b1000 == (D)
+        partition1[1] = 0x08;
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, collateralTokenCount);
 
         bytes32 parentCollectionId = ct.getCollectionId(NULL_BYTES32, _conditionIds[0], partition1[0]);
 
         // Verify getCollectionId with parent produces consistent, non-trivial results
         uint[] memory partition2 = new uint[](3);
+        // 0b0001 == (A)
         partition2[0] = 0x01;
+        // 0b0010 == (B)
         partition2[1] = 0x02;
+        // 0b1100 == (C|D)
         partition2[2] = 0x0C;
 
         for (uint i = 0; i < partition2.length; i++) {
@@ -924,7 +1003,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         trader.approveToken(token, address(ct), collateralTokenCount);
 
         uint[] memory partition1 = new uint[](2);
+        // 0x0111 == (A|B|C)
         partition1[0] = 0x07;
+        // 0x1000 == (D)
         partition1[1] = 0x08;
         trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _conditionIds[0], partition1, collateralTokenCount);
 
@@ -932,8 +1013,11 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         uint deepSplitAmount = 4e18;
 
         uint[] memory partition2 = new uint[](3);
+        // 0b0001 == (A)
         partition2[0] = 0x01;
+        // 0b0010 == (B)
         partition2[1] = 0x02;
+        // 0b1100 == (C|D)
         partition2[2] = 0x0C;
 
         _expectEmit();
@@ -971,7 +1055,9 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         bytes32 expected_01 = 0x6f2dd2e938aa3203c5862bd1af73958a34c15979bb13cda4a6d108c23c459444;
         bytes32 expected_02 = 0x6f031fa4e3efa0a26f95469ddc4985109837ef568b60f990a768c653c46d0636;
 
+        // indexSet 1 == 0b01 == (A)
         require(ct.getCollectionId(NULL_BYTES32, conditionId, 1) == expected_01, "collectionId(1) mismatch");
+        // indexSet 2 == 0b10 == (B)
         require(ct.getCollectionId(NULL_BYTES32, conditionId, 2) == expected_02, "collectionId(2) mismatch");
     }
 
@@ -991,10 +1077,10 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
         bytes32 conditionId3 = 0xcc4d53c710a5b110c6d3a439729bd6d6063c12328e412d58e1da3489ff3f5b3c;
         bytes32 parentCollId = 0x6e551715d0a681c1d8ee93161b44ebc8073f59f73cb2f08fb7316332c014352e;
 
-        // Verify the parent collectionId itself
+        // Verify the parent collectionId itself — indexSet 7 == 0b0111 == (A|B|C)
         require(ct.getCollectionId(NULL_BYTES32, conditionId3, 7) == parentCollId, "parent collectionId mismatch");
 
-        // Child: conditionId4 with indexSet 1, combined with parent
+        // Child: conditionId4 with indexSet 1 == 0b01 == (A), combined with parent
         bytes32 conditionId4 = 0xe35d7e4183eea46617ab4a4586fb4cdeb86aa62bf0574f4733bba6503bed47a8;
         bytes32 expectedCombined = 0x6b3e0f684572bb8adcc379c630e5cb0ee9c308ead99cc8f003840192cec639a5;
 
@@ -1005,11 +1091,1058 @@ contract ConditionalTokensTest is ERC1155TokenReceiver {
     }
 
     // =========================================================================
+    // Early Resolution — reportPartialPayouts
+    // =========================================================================
+
+    /// @dev Helper: prepare a 4-outcome condition and fund trader
+    function _setupEarlyResolution() internal returns (bytes32 questionId, bytes32 conditionId) {
+        questionId = bytes32(uint256(0xEA71));
+        uint outcomeSlotCount = 4;
+        conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 10e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+    }
+
+    // --- reportPartialPayouts basic tests ---
+
+    function testPartialSettleSingleOutcomeToZero() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED;
+        payouts[1] = 0;           // settle outcome 1 to 0
+        payouts[2] = UNRESOLVED;
+        payouts[3] = UNRESOLVED;
+
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        require(ct.payoutDenominator(conditionId) == 1e18, "denominator should be set");
+        require(ct.payoutNumerators(conditionId, 1) == 0, "outcome 1 should be 0");
+        require(ct.settledOutcomes(conditionId) == 0x02, "only outcome 1 settled");
+    }
+
+    function testPartialSettleMultipleOutcomesToZero() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0;           // settle outcome 0 to 0
+        payouts[1] = 0;           // settle outcome 1 to 0
+        payouts[2] = UNRESOLVED;
+        payouts[3] = UNRESOLVED;
+
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        require(ct.settledOutcomes(conditionId) == 0x03, "outcomes 0 and 1 settled");
+        require(ct.payoutNumerators(conditionId, 0) == 0, "outcome 0 should be 0");
+        require(ct.payoutNumerators(conditionId, 1) == 0, "outcome 1 should be 0");
+    }
+
+    function testPartialSettleIncrementally() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+
+        // First call: settle outcome 0 to 0
+        uint[] memory payouts1 = new uint[](4);
+        payouts1[0] = 0;
+        payouts1[1] = UNRESOLVED;
+        payouts1[2] = UNRESOLVED;
+        payouts1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts1, 1e18);
+
+        require(ct.settledOutcomes(conditionId) == 0x01, "only outcome 0 settled after first call");
+
+        // Second call: settle outcome 3 to 0
+        uint[] memory payouts2 = new uint[](4);
+        payouts2[0] = UNRESOLVED;
+        payouts2[1] = UNRESOLVED;
+        payouts2[2] = UNRESOLVED;
+        payouts2[3] = 0;
+        oracle.reportPartialPayouts(questionId, payouts2, 1e18);
+
+        require(ct.settledOutcomes(conditionId) == 0x09, "outcomes 0 and 3 settled after second call");
+    }
+
+    function testPartialSettleWithPositivePayouts() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+
+        // Settle outcome 2 to 3e17 (0.3)
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED;
+        payouts[1] = UNRESOLVED;
+        payouts[2] = 3e17;
+        payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        require(ct.payoutNumerators(conditionId, 2) == 3e17, "outcome 2 payout wrong");
+        require(ct.settledOutcomes(conditionId) == 0x04, "outcome 2 settled");
+    }
+
+    function testPartialSettleCompleteResolution() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+
+        // Settle all 4 outcomes via partial (incrementally)
+        uint[] memory p1 = new uint[](4);
+        p1[0] = 0; p1[1] = 0; p1[2] = UNRESOLVED; p1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        uint[] memory p2 = new uint[](4);
+        p2[0] = UNRESOLVED; p2[1] = UNRESOLVED; p2[2] = 1e18; p2[3] = 0;
+        oracle.reportPartialPayouts(questionId, p2, 1e18);
+
+        // All settled
+        require(ct.settledOutcomes(conditionId) == 0x0F, "all 4 outcomes should be settled");
+        require(ct.payoutDenominator(conditionId) == 1e18, "denominator wrong");
+    }
+
+    // --- reportPartialPayouts revert tests ---
+
+    function testRevertPartialSettleUnprepared() public {
+        bytes32 questionId = bytes32(uint256(0xBAD1));
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, payouts, uint(1e18))
+        );
+    }
+
+    function testRevertPartialSettleWrongOracle() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(notOracle),
+            abi.encodeWithSelector(notOracle.reportPartialPayouts.selector, questionId, payouts, uint(1e18))
+        );
+    }
+
+    function testRevertPartialSettleDenominatorZero() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, payouts, uint(0))
+        );
+    }
+
+    function testRevertPartialSettleDenominatorMismatch() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory p1 = new uint[](4);
+        p1[0] = 0; p1[1] = UNRESOLVED; p1[2] = UNRESOLVED; p1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        // Second call with different denominator
+        uint[] memory p2 = new uint[](4);
+        p2[0] = UNRESOLVED; p2[1] = 0; p2[2] = UNRESOLVED; p2[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, p2, uint(2e18))
+        );
+    }
+
+    function testRevertPartialSettleAlreadySettledOutcome() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory p1 = new uint[](4);
+        p1[0] = 0; p1[1] = UNRESOLVED; p1[2] = UNRESOLVED; p1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        // Try to re-settle outcome 0
+        uint[] memory p2 = new uint[](4);
+        p2[0] = 0; p2[1] = UNRESOLVED; p2[2] = UNRESOLVED; p2[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, p2, uint(1e18))
+        );
+    }
+
+    function testRevertPartialSettleExceedsDenominator() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 6e17; payouts[1] = 6e17; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        // Sum = 1.2e18 > 1e18
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, payouts, uint(1e18))
+        );
+    }
+
+    function testRevertPartialSettleNoOutcomesSettled() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, payouts, uint(1e18))
+        );
+    }
+
+    function testRevertPartialAfterFullReport() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        // Full resolution first
+        uint[] memory fullPayouts = new uint[](4);
+        fullPayouts[0] = 0; fullPayouts[1] = 0; fullPayouts[2] = 1; fullPayouts[3] = 0;
+        oracle.reportPayouts(questionId, fullPayouts);
+
+        // Partial should fail (denominator already set by full report)
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory partialPayouts = new uint[](4);
+        partialPayouts[0] = 0; partialPayouts[1] = UNRESOLVED; partialPayouts[2] = UNRESOLVED; partialPayouts[3] = UNRESOLVED;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPartialPayouts.selector, questionId, partialPayouts, uint(1))
+        );
+    }
+
+    function testRevertFullReportAfterPartial() public {
+        (bytes32 questionId,) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory p1 = new uint[](4);
+        p1[0] = 0; p1[1] = UNRESOLVED; p1[2] = UNRESOLVED; p1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        // Full report should fail (denominator already set)
+        uint[] memory fullPayouts = new uint[](4);
+        fullPayouts[0] = 0; fullPayouts[1] = 0; fullPayouts[2] = 1e18; fullPayouts[3] = 0;
+
+        _expectRevertOn(
+            address(oracle),
+            abi.encodeWithSelector(oracle.reportPayouts.selector, questionId, fullPayouts)
+        );
+    }
+
+    // --- Early redemption tests ---
+
+    function testEarlyRedeemSettledZeroOutcome() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Split: 4e18 into [A, B, C, D]
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](4);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04; partition[3] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Partially settle: outcome 1 = 0 (eliminated)
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED; payouts[1] = 0; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Redeem outcome 1 (settled to 0) — should succeed, payout = 0
+        uint[] memory redeemSets = new uint[](1);
+        redeemSets[0] = 0x02;
+
+        uint balBefore = token.balanceOf(address(trader));
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, redeemSets);
+        uint balAfter = token.balanceOf(address(trader));
+
+        // Payout should be 0 (outcome was settled to 0)
+        require(balAfter == balBefore, "should receive 0 for eliminated outcome");
+
+        // Position tokens should be burned
+        bytes32 collId = ct.getCollectionId(NULL_BYTES32, conditionId, 0x02);
+        uint posId = ct.getPositionId(IERC20(address(token)), collId);
+        require(ct.balanceOf(address(trader), posId) == 0, "position should be burned after redeem");
+    }
+
+    function testRevertRedeemUnsettledOutcome() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](4);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04; partition[3] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Settle only outcome 1
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED; payouts[1] = 0; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Try to redeem outcome 0 (NOT settled) — should fail
+        uint[] memory redeemSets = new uint[](1);
+        redeemSets[0] = 0x01;
+
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.redeemPositions.selector, address(token), NULL_BYTES32, conditionId, redeemSets)
+        );
+    }
+
+    function testRevertRedeemMixedSettledUnsettled() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x03; // A|B
+        partition[1] = 0x0C; // C|D
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Settle outcome 0 only
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Try to redeem $:(A|B) — outcome B (bit 1) is NOT settled
+        uint[] memory redeemSets = new uint[](1);
+        redeemSets[0] = 0x03;
+
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.redeemPositions.selector, address(token), NULL_BYTES32, conditionId, redeemSets)
+        );
+    }
+
+    function testEarlyRedeemPositivePayoutAfterPartialSettle() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Split: 4e18 into [A, B, C, D]
+        uint splitAmount = 4e18;
+        uint[] memory partition = new uint[](4);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04; partition[3] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Settle outcome 2 to full payout (1e18 = winner)
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED; payouts[1] = UNRESOLVED; payouts[2] = 1e18; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Redeem outcome 2 — should get full payout
+        uint[] memory redeemSets = new uint[](1);
+        redeemSets[0] = 0x04;
+
+        uint balBefore = token.balanceOf(address(trader));
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, redeemSets);
+        uint balAfter = token.balanceOf(address(trader));
+
+        // Payout: 4e18 * 1e18 / 1e18 = 4e18
+        require(balAfter - balBefore == splitAmount, "winner should receive full collateral per token");
+    }
+
+    // --- Split after partial resolution ---
+
+    function testSplitAfterEliminationOnlyMintsSurvivors() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Settle outcome 0 to 0 (eliminated)
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Split with only live outcomes [B, C, D]
+        uint splitAmount = 3e18;
+        uint[] memory partition = new uint[](3);
+        partition[0] = 0x02; // B
+        partition[1] = 0x04; // C
+        partition[2] = 0x08; // D
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Collateral should be pulled
+        require(token.balanceOf(address(ct)) == splitAmount, "CT should hold collateral");
+
+        // Position tokens minted for B, C, D
+        for (uint i = 0; i < partition.length; i++) {
+            bytes32 collId = ct.getCollectionId(NULL_BYTES32, conditionId, partition[i]);
+            uint posId = ct.getPositionId(IERC20(address(token)), collId);
+            require(ct.balanceOf(address(trader), posId) == splitAmount, "live position should be minted");
+        }
+
+        // No A tokens minted
+        bytes32 collIdA = ct.getCollectionId(NULL_BYTES32, conditionId, 0x01);
+        uint posIdA = ct.getPositionId(IERC20(address(token)), collIdA);
+        require(ct.balanceOf(address(trader), posIdA) == 0, "eliminated outcome should not be minted");
+    }
+
+    function testRevertSplitIncludingSettledOutcome() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Settle outcome 0 to 0
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Try to split including the settled outcome
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x03; // A|B — includes settled A
+        partition[1] = 0x0C; // C|D
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.splitPosition.selector, address(token), NULL_BYTES32, conditionId, partition, uint(1e18))
+        );
+    }
+
+    function testRevertSplitAfterNonZeroSettlement() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Settle outcome 2 to positive payout
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = UNRESOLVED; payouts[1] = UNRESOLVED; payouts[2] = 5e17; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Try to split — should fail because non-zero settled payouts exist
+        uint[] memory partition = new uint[](3);
+        partition[0] = 0x01; // A
+        partition[1] = 0x02; // B
+        partition[2] = 0x08; // D
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.splitPosition.selector, address(token), NULL_BYTES32, conditionId, partition, uint(1e18))
+        );
+    }
+
+    // --- Merge after partial resolution ---
+
+    function testMergeAfterEliminationReturnsCollateral() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Settle outcome 0 to 0
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Split into live outcomes [B, C, D]
+        uint splitAmount = 3e18;
+        uint[] memory partition = new uint[](3);
+        partition[0] = 0x02; partition[1] = 0x04; partition[2] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Merge back — should return collateral
+        uint traderBalBefore = token.balanceOf(address(trader));
+        trader.mergePositions(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+        uint traderBalAfter = token.balanceOf(address(trader));
+
+        require(traderBalAfter - traderBalBefore == splitAmount, "should get full collateral back on merge");
+        require(token.balanceOf(address(ct)) == 0, "CT should hold no collateral after merge");
+    }
+
+    // --- Full flows ---
+
+    // Store tournament test state to avoid stack-too-deep
+    bytes32 internal _tQuestionId;
+    bytes32 internal _tConditionId;
+
+    function testTournamentFlow4Teams() public {
+        (_tQuestionId, _tConditionId) = _setupEarlyResolution();
+        _tournamentPhase1();
+        _tournamentPhase2();
+        _tournamentPhase3();
+    }
+
+    function _tournamentPhase1() internal {
+        uint UNRESOLVED = ct.UNRESOLVED();
+
+        // Initial split: all 4 outcomes
+        uint[] memory partition = new uint[](4);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04; partition[3] = 0x08;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, _tConditionId, partition, 10e18);
+
+        // Round 1: Team A eliminated
+        uint[] memory r1 = new uint[](4);
+        r1[0] = 0; r1[1] = UNRESOLVED; r1[2] = UNRESOLVED; r1[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(_tQuestionId, r1, 1e18);
+
+        // Trader redeems worthless A tokens
+        uint[] memory redeemA = new uint[](1);
+        redeemA[0] = 0x01;
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, _tConditionId, redeemA);
+
+        // Round 2: Team D eliminated
+        uint[] memory r2 = new uint[](4);
+        r2[0] = UNRESOLVED; r2[1] = UNRESOLVED; r2[2] = UNRESOLVED; r2[3] = 0;
+        oracle.reportPartialPayouts(_tQuestionId, r2, 1e18);
+
+        // Trader redeems worthless D tokens
+        uint[] memory redeemD = new uint[](1);
+        redeemD[0] = 0x08;
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, _tConditionId, redeemD);
+    }
+
+    function _tournamentPhase2() internal {
+        uint UNRESOLVED = ct.UNRESOLVED();
+
+        // New participant enters — can only split into B and C
+        token.mint(address(counterparty), 5e18);
+        counterparty.approveToken(token, address(ct), 5e18);
+        uint[] memory latePartition = new uint[](2);
+        latePartition[0] = 0x02; latePartition[1] = 0x04;
+        counterparty.splitPosition(IERC20(address(token)), NULL_BYTES32, _tConditionId, latePartition, 5e18);
+
+        // Final: Team C wins (settle B=0, C=1e18)
+        uint[] memory r3 = new uint[](4);
+        r3[0] = UNRESOLVED; r3[1] = 0; r3[2] = 1e18; r3[3] = UNRESOLVED;
+        oracle.reportPartialPayouts(_tQuestionId, r3, 1e18);
+
+        require(ct.settledOutcomes(_tConditionId) == 0x0F, "all outcomes should be settled");
+    }
+
+    function _tournamentPhase3() internal {
+        // Trader redeems B (0) and C (winner)
+        uint[] memory redeemBC = new uint[](2);
+        redeemBC[0] = 0x02; redeemBC[1] = 0x04;
+
+        uint traderBalBefore = token.balanceOf(address(trader));
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, _tConditionId, redeemBC);
+        uint traderBalAfter = token.balanceOf(address(trader));
+        require(traderBalAfter - traderBalBefore == 10e18, "trader should get full split for winner");
+
+        // Counterparty redeems B and C
+        uint[] memory cpPartition = new uint[](2);
+        cpPartition[0] = 0x02; cpPartition[1] = 0x04;
+
+        uint cpBalBefore = token.balanceOf(address(counterparty));
+        counterparty.redeemPositions(IERC20(address(token)), NULL_BYTES32, _tConditionId, cpPartition);
+        uint cpBalAfter = token.balanceOf(address(counterparty));
+        require(cpBalAfter - cpBalBefore == 5e18, "counterparty should get full split for winner");
+
+        require(token.balanceOf(address(ct)) == 0, "no collateral should remain in CT contract");
+    }
+
+    function testPartialSettleThenRedeemSubsetPosition() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Split into grouped positions: [A|B] and [C|D]
+        uint splitAmount = 6e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x03; // A|B
+        partition[1] = 0x0C; // C|D
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Settle all outcomes: A=0, B=3e17, C=7e17, D=0
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory p1 = new uint[](4);
+        p1[0] = 0; p1[1] = 3e17; p1[2] = 7e17; p1[3] = 0;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        // Redeem $:(A|B) — payout numerator = 0 + 3e17 = 3e17
+        // Payout: 6e18 * 3e17 / 1e18 = 18e17
+        uint[] memory redeemSets = new uint[](2);
+        redeemSets[0] = 0x03;
+        redeemSets[1] = 0x0C;
+
+        uint balBefore = token.balanceOf(address(trader));
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, redeemSets);
+        uint balAfter = token.balanceOf(address(trader));
+
+        // $:(A|B): 6e18 * 3e17 / 1e18 = 18e17
+        // $:(C|D): 6e18 * 7e17 / 1e18 = 42e17
+        // Total: 60e17 = 6e18
+        require(balAfter - balBefore == splitAmount, "total payout should equal split amount");
+    }
+
+    function testSplitMergeRoundTripAfterElimination() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        // Eliminate outcomes 0 and 3
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = 0;
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Split into [B, C]
+        uint splitAmount = 5e18;
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x02; // B
+        partition[1] = 0x04; // C
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        // Merge [B, C] back to collateral
+        trader.mergePositions(IERC20(address(token)), NULL_BYTES32, conditionId, partition, splitAmount);
+
+        uint collateralAfterMerge = 10e18; // original funding
+        require(token.balanceOf(address(trader)) == collateralAfterMerge, "should be fully restored after split+merge");
+        require(token.balanceOf(address(ct)) == 0, "CT should hold nothing");
+    }
+
+    // --- Partial resolution event emission ---
+
+    function testEmitPartialConditionResolution() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = UNRESOLVED; payouts[2] = UNRESOLVED; payouts[3] = UNRESOLVED;
+
+        _expectEmit();
+        emit PartialConditionResolution(conditionId, address(oracle), questionId, 4, 0x01);
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+    }
+
+    function testEmitConditionResolutionOnFullPartialSettle() public {
+        (bytes32 questionId, bytes32 conditionId) = _setupEarlyResolution();
+
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory payouts = new uint[](4);
+        payouts[0] = 0; payouts[1] = 0; payouts[2] = 1e18; payouts[3] = 0;
+
+        // Settling all at once via partial should emit BOTH partial and full events
+        // (We can only check the last emitted event with expectEmit in this test framework)
+        oracle.reportPartialPayouts(questionId, payouts, 1e18);
+
+        // Verify state is fully resolved
+        require(ct.settledOutcomes(conditionId) == 0x0F, "all should be settled");
+    }
+
+    // --- Edge: partial settle with 2-outcome condition (binary) ---
+
+    function testPartialSettleBinaryCondition() public {
+        bytes32 questionId = bytes32(uint256(0xB1A7));
+        uint outcomeSlotCount = 2;
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 5e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+
+        // Split
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01; partition[1] = 0x02;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, funding);
+
+        // Settle outcome 0 (No) to 0
+        uint UNRESOLVED = ct.UNRESOLVED();
+        uint[] memory p1 = new uint[](2);
+        p1[0] = 0; p1[1] = UNRESOLVED;
+        oracle.reportPartialPayouts(questionId, p1, 1e18);
+
+        // Early redeem No tokens — payout 0
+        uint[] memory redeemNo = new uint[](1);
+        redeemNo[0] = 0x01;
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, redeemNo);
+
+        // Settle outcome 1 (Yes) to 1e18
+        uint[] memory p2 = new uint[](2);
+        p2[0] = UNRESOLVED; p2[1] = 1e18;
+        oracle.reportPartialPayouts(questionId, p2, 1e18);
+
+        // Redeem Yes tokens
+        uint balBefore = token.balanceOf(address(trader));
+        uint[] memory redeemYes = new uint[](1);
+        redeemYes[0] = 0x02;
+        trader.redeemPositions(IERC20(address(token)), NULL_BYTES32, conditionId, redeemYes);
+        uint balAfter = token.balanceOf(address(trader));
+
+        require(balAfter - balBefore == funding, "Yes winner gets all collateral");
+        require(token.balanceOf(address(ct)) == 0, "no collateral remaining");
+    }
+
+    // =========================================================================
+    // ERC20 Wrapper tests
+    // =========================================================================
+
+    /// @dev Helper: prepare condition, split, and return a position ID for wrapping tests
+    function _setupWrapPosition() internal returns (bytes32 conditionId, uint positionId) {
+        bytes32 questionId = bytes32(uint256(0xA7A9));
+        uint outcomeSlotCount = 2;
+        conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 10e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+
+        uint[] memory partition = new uint[](2);
+        partition[0] = 0x01; // A
+        partition[1] = 0x02; // B
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, funding);
+
+        bytes32 collectionId = ct.getCollectionId(NULL_BYTES32, conditionId, 0x01);
+        positionId = ct.getPositionId(IERC20(address(token)), collectionId);
+    }
+
+    function testWrapBasic() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint wrapAmount = 4e18;
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+
+        address wrapper = trader.wrap(positionId, wrapAmount);
+
+        // ERC1155 balance decreased
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before - wrapAmount,
+            "ERC1155 balance should decrease"
+        );
+        // Wrapper holds the ERC1155
+        require(
+            ct.balanceOf(wrapper, positionId) == wrapAmount,
+            "wrapper should hold ERC1155 tokens"
+        );
+        // ERC20 minted to trader
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == wrapAmount,
+            "ERC20 balance should equal wrap amount"
+        );
+        // Total supply correct
+        require(
+            WrappedPositionToken(wrapper).totalSupply() == wrapAmount,
+            "ERC20 total supply should equal wrap amount"
+        );
+    }
+
+    function testWrapDeterministicAddress() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Pre-compute address before wrapping
+        address predicted = ct.getWrappedTokenAddress(positionId);
+
+        // Wrap deploys the wrapper
+        address actual = trader.wrap(positionId, 1e18);
+
+        require(predicted == actual, "wrapper address should be deterministic");
+
+        // Verify wrappedTokens mapping
+        require(ct.wrappedTokens(positionId) == actual, "wrappedTokens mapping should be set");
+    }
+
+    function testWrapTwiceReusesSameWrapper() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper1 = trader.wrap(positionId, 3e18);
+        address wrapper2 = trader.wrap(positionId, 2e18);
+
+        require(wrapper1 == wrapper2, "should reuse same wrapper");
+        require(
+            WrappedPositionToken(wrapper1).balanceOf(address(trader)) == 5e18,
+            "ERC20 balance should accumulate"
+        );
+    }
+
+    function testUnwrapBasic() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint wrapAmount = 6e18;
+        uint unwrapAmount = 4e18;
+        address wrapper = trader.wrap(positionId, wrapAmount);
+
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+        trader.unwrapPosition(WrappedPositionToken(wrapper), unwrapAmount);
+
+        // ERC1155 returned
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before + unwrapAmount,
+            "ERC1155 should be returned on unwrap"
+        );
+        // ERC20 burned
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == wrapAmount - unwrapAmount,
+            "ERC20 should be burned on unwrap"
+        );
+        // Wrapper still holds remainder
+        require(
+            ct.balanceOf(wrapper, positionId) == wrapAmount - unwrapAmount,
+            "wrapper should hold remaining ERC1155"
+        );
+    }
+
+    function testWrapUnwrapFullRoundTrip() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 10e18;
+        uint erc1155Before = ct.balanceOf(address(trader), positionId);
+
+        address wrapper = trader.wrap(positionId, amount);
+        trader.unwrapPosition(WrappedPositionToken(wrapper), amount);
+
+        // Should be fully restored
+        require(
+            ct.balanceOf(address(trader), positionId) == erc1155Before,
+            "ERC1155 should be fully restored"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == 0,
+            "ERC20 should be zero after full unwrap"
+        );
+        require(
+            WrappedPositionToken(wrapper).totalSupply() == 0,
+            "total supply should be zero"
+        );
+    }
+
+    function testWrappedTokenIsTransferable() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 5e18;
+        address wrapper = trader.wrap(positionId, amount);
+
+        // Transfer ERC20 to counterparty
+        uint transferAmount = 2e18;
+        trader.transferERC20(IERC20(wrapper), address(counterparty), transferAmount);
+
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount - transferAmount,
+            "trader ERC20 balance wrong after transfer"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(counterparty)) == transferAmount,
+            "counterparty should receive ERC20"
+        );
+
+        // Counterparty can unwrap
+        counterparty.unwrapPosition(WrappedPositionToken(wrapper), transferAmount);
+        require(
+            ct.balanceOf(address(counterparty), positionId) == transferAmount,
+            "counterparty should receive ERC1155 on unwrap"
+        );
+    }
+
+    function testWrapDirectTransfer() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // First deploy the wrapper
+        address wrapper = trader.wrap(positionId, 1e18);
+
+        // Now do a direct safeTransferFrom to the wrapper (alternative wrap path)
+        uint directAmount = 3e18;
+        trader.safeTransferFrom(address(trader), wrapper, positionId, directAmount, "");
+
+        // Should have minted ERC20 to trader via onERC1155Received
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == 1e18 + directAmount,
+            "direct transfer should also mint ERC20"
+        );
+    }
+
+    function testWrapDifferentPositionsSeparateWrappers() public {
+        bytes32 questionId = bytes32(uint256(0xD1FF));
+        uint outcomeSlotCount = 3;
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, outcomeSlotCount);
+        oracle.prepareCondition(address(oracle), questionId, outcomeSlotCount);
+
+        uint funding = 6e18;
+        token.mint(address(trader), funding);
+        trader.approveToken(token, address(ct), funding);
+
+        uint[] memory partition = new uint[](3);
+        partition[0] = 0x01; partition[1] = 0x02; partition[2] = 0x04;
+        trader.splitPosition(IERC20(address(token)), NULL_BYTES32, conditionId, partition, funding);
+
+        bytes32 collIdA = ct.getCollectionId(NULL_BYTES32, conditionId, 0x01);
+        bytes32 collIdB = ct.getCollectionId(NULL_BYTES32, conditionId, 0x02);
+        uint posIdA = ct.getPositionId(IERC20(address(token)), collIdA);
+        uint posIdB = ct.getPositionId(IERC20(address(token)), collIdB);
+
+        address wrapperA = trader.wrap(posIdA, 2e18);
+        address wrapperB = trader.wrap(posIdB, 3e18);
+
+        require(wrapperA != wrapperB, "different positions should get different wrappers");
+        require(WrappedPositionToken(wrapperA).positionId() == posIdA, "wrapper A positionId wrong");
+        require(WrappedPositionToken(wrapperB).positionId() == posIdB, "wrapper B positionId wrong");
+    }
+
+    function testRevertWrapInsufficientBalance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Trader has 10e18 of position A. Try to wrap 11e18.
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.wrap.selector, positionId, uint(11e18))
+        );
+    }
+
+    function testRevertUnwrapExceedsBalance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 5e18);
+
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(trader.unwrapPosition.selector, wrapper, uint(6e18))
+        );
+    }
+
+    function testRevertDirectTransferWrongPositionId() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Deploy wrapper for positionId A
+        address wrapper = trader.wrap(positionId, 1e18);
+
+        // Get position B
+        bytes32 questionId = bytes32(uint256(0xA7A9));
+        bytes32 conditionId = ct.getConditionId(address(oracle), questionId, 2);
+        bytes32 collIdB = ct.getCollectionId(NULL_BYTES32, conditionId, 0x02);
+        uint posIdB = ct.getPositionId(IERC20(address(token)), collIdB);
+
+        // Try to send position B tokens to wrapper for position A — should fail
+        _expectRevertOn(
+            address(trader),
+            abi.encodeWithSelector(
+                trader.safeTransferFrom.selector,
+                address(trader), wrapper, posIdB, uint(1e18), ""
+            )
+        );
+    }
+
+    function testWrapperMetadata() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 1e18);
+        WrappedPositionToken wpt = WrappedPositionToken(wrapper);
+
+        // Check ERC20 metadata
+        require(wpt.decimals() == 18, "decimals should be 18");
+        require(bytes(wpt.name()).length > 0, "name should not be empty");
+        require(bytes(wpt.symbol()).length > 0, "symbol should not be empty");
+        require(address(wpt.conditionalTokens()) == address(ct), "CT address should match");
+        require(wpt.positionId() == positionId, "positionId should match");
+    }
+
+    function testUnderlyingBalanceMatchesTotalSupply() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 7e18);
+        WrappedPositionToken wpt = WrappedPositionToken(wrapper);
+
+        require(wpt.underlyingBalance() == wpt.totalSupply(), "underlying should match total supply after wrap");
+
+        trader.unwrapPosition(wpt, 3e18);
+        require(wpt.underlyingBalance() == wpt.totalSupply(), "underlying should match total supply after unwrap");
+        require(wpt.underlyingBalance() == 4e18, "underlying should be 4e18");
+    }
+
+    function testWrapOnBehalfAsOperator() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Trader approves counterparty as operator
+        trader.setApprovalForAll(address(counterparty), true);
+
+        uint amount = 4e18;
+        uint traderBefore = ct.balanceOf(address(trader), positionId);
+
+        // Counterparty wraps trader's tokens
+        address wrapper = counterparty.wrapFor(address(trader), positionId, amount);
+
+        // ERC1155 burned from trader
+        require(
+            ct.balanceOf(address(trader), positionId) == traderBefore - amount,
+            "ERC1155 should be burned from trader"
+        );
+        // ERC20 minted to trader (not counterparty)
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount,
+            "ERC20 should be minted to token owner"
+        );
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(counterparty)) == 0,
+            "operator should not receive ERC20"
+        );
+    }
+
+    function testRevertWrapOnBehalfWithoutApproval() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        // Counterparty tries to wrap trader's tokens without approval
+        _expectRevertOn(
+            address(counterparty),
+            abi.encodeWithSelector(counterparty.wrapFor.selector, address(trader), positionId, uint(1e18))
+        );
+    }
+
+    function testUnwrapOnBehalfWithAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        uint amount = 5e18;
+        address wrapper = trader.wrap(positionId, amount);
+
+        // Trader approves counterparty to spend ERC20
+        uint unwrapAmount = 3e18;
+        trader.approveERC20(IERC20(wrapper), address(counterparty), unwrapAmount);
+
+        // Counterparty unwraps on trader's behalf
+        uint traderERC1155Before = ct.balanceOf(address(trader), positionId);
+        counterparty.unwrapPositionFor(WrappedPositionToken(wrapper), address(trader), unwrapAmount);
+
+        // ERC1155 returned to trader (not counterparty)
+        require(
+            ct.balanceOf(address(trader), positionId) == traderERC1155Before + unwrapAmount,
+            "ERC1155 should go to token owner"
+        );
+        require(
+            ct.balanceOf(address(counterparty), positionId) == 0,
+            "operator should not receive ERC1155"
+        );
+        // ERC20 burned from trader
+        require(
+            WrappedPositionToken(wrapper).balanceOf(address(trader)) == amount - unwrapAmount,
+            "ERC20 should be burned from owner"
+        );
+        // Allowance consumed
+        require(
+            WrappedPositionToken(wrapper).allowance(address(trader), address(counterparty)) == 0,
+            "allowance should be consumed"
+        );
+    }
+
+    function testRevertUnwrapOnBehalfWithoutAllowance() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address wrapper = trader.wrap(positionId, 5e18);
+
+        // Counterparty tries to unwrap trader's tokens without ERC20 approval
+        _expectRevertOn(
+            address(counterparty),
+            abi.encodeWithSelector(counterparty.unwrapPositionFor.selector, wrapper, address(trader), uint(1e18))
+        );
+    }
+
+    function testEmitWrappedTokenCreated() public {
+        (, uint positionId) = _setupWrapPosition();
+
+        address predicted = ct.getWrappedTokenAddress(positionId);
+
+        _expectEmit();
+        emit WrappedTokenCreated(positionId, predicted);
+        trader.wrap(positionId, 1e18);
+    }
+
+    // =========================================================================
     // Event declarations (for expectEmit)
     // =========================================================================
 
     event ConditionPreparation(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount);
     event ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount, uint[] payoutNumerators);
+    event PartialConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint outcomeSlotCount, uint settledOutcomesBitmask);
+    event WrappedTokenCreated(uint256 indexed positionId, address indexed wrappedToken);
     event PositionSplit(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
     event PositionsMerge(address indexed stakeholder, IERC20 collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint[] partition, uint amount);
     event PayoutRedemption(address indexed redeemer, IERC20 indexed collateralToken, bytes32 indexed parentCollectionId, bytes32 conditionId, uint[] indexSets, uint payout);

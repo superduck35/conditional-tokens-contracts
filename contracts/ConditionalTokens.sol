@@ -2,8 +2,12 @@ pragma solidity ^0.5.1;
 import { IERC20 } from "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
 import { ERC1155 } from "./ERC1155/ERC1155.sol";
 import { CTHelpers } from "./CTHelpers.sol";
+import { WrappedPositionToken } from "./WrappedPositionToken.sol";
 
 contract ConditionalTokens is ERC1155 {
+
+    /// @dev Emitted when a wrapped ERC20 token is deployed for a position.
+    event WrappedTokenCreated(uint256 indexed positionId, address indexed wrappedToken);
 
     /// @dev Emitted upon the successful preparation of a condition.
     /// @param conditionId The condition's ID. This ID may be derived from the other three parameters via ``keccak256(abi.encodePacked(oracle, questionId, outcomeSlotCount))``.
@@ -23,6 +27,15 @@ contract ConditionalTokens is ERC1155 {
         bytes32 indexed questionId,
         uint outcomeSlotCount,
         uint[] payoutNumerators
+    );
+
+    /// @dev Emitted when individual outcomes are settled via reportPartialPayouts.
+    event PartialConditionResolution(
+        bytes32 indexed conditionId,
+        address indexed oracle,
+        bytes32 indexed questionId,
+        uint outcomeSlotCount,
+        uint settledOutcomesBitmask
     );
 
     /// @dev Emitted when a position is successfully split.
@@ -52,11 +65,18 @@ contract ConditionalTokens is ERC1155 {
         uint payout
     );
 
+    /// Sentinel value used in reportPartialPayouts to indicate an outcome should not be settled.
+    uint constant public UNRESOLVED = uint(-1);
 
     /// Mapping key is an condition ID. Value represents numerators of the payout vector associated with the condition. This array is initialized with a length equal to the outcome slot count. E.g. Condition with 3 outcomes [A, B, C] and two of those correct [0.5, 0.5, 0]. In Ethereum there are no decimal values, so here, 0.5 is represented by fractions like 1/2 == 0.5. That's why we need numerator and denominator values. Payout numerators are also used as a check of initialization. If the numerators array is empty (has length zero), the condition was not created/prepared. See getOutcomeSlotCount.
     mapping(bytes32 => uint[]) public payoutNumerators;
     /// Denominator is also used for checking if the condition has been resolved. If the denominator is non-zero, then the condition has been resolved.
     mapping(bytes32 => uint) public payoutDenominator;
+    /// Bitmask tracking which outcome slots have been individually settled (via partial or full resolution).
+    mapping(bytes32 => uint) public settledOutcomes;
+
+    /// @dev Maps each ERC1155 position ID to its ERC20 wrapper contract address (0 if not yet deployed).
+    mapping(uint256 => address) public wrappedTokens;
 
     /// @dev This function prepares a condition by initializing a payout vector associated with the condition.
     /// @param oracle The account assigned to report the result for the prepared condition.
@@ -93,7 +113,87 @@ contract ConditionalTokens is ERC1155 {
         }
         require(den > 0, "payout is all zeroes");
         payoutDenominator[conditionId] = den;
+
+        // Mark all outcomes as settled for consistency with partial resolution path
+        uint fullIndexSet = (1 << outcomeSlotCount) - 1;
+        settledOutcomes[conditionId] = fullIndexSet;
+
         emit ConditionResolution(conditionId, msg.sender, questionId, outcomeSlotCount, payoutNumerators[conditionId]);
+    }
+
+    /// @dev Called by the oracle to incrementally settle individual outcomes of a condition.
+    ///      Enables early resolution: outcomes can be settled one at a time (or in batches).
+    ///      Each outcome can only be settled once. The total of all settled payouts must not exceed the denominator.
+    ///      Use UNRESOLVED (type(uint).max) in the payouts array to skip an outcome.
+    /// @param questionId The question ID the oracle is answering for
+    /// @param payouts Array of length outcomeSlotCount. UNRESOLVED = skip, any other value = settle.
+    /// @param denominator The total payout denominator. Set on first call; must match on subsequent calls.
+    function reportPartialPayouts(bytes32 questionId, uint[] calldata payouts, uint denominator) external {
+        uint outcomeSlotCount = payouts.length;
+        require(outcomeSlotCount > 1, "there should be more than one outcome slot");
+        bytes32 conditionId = CTHelpers.getConditionId(msg.sender, questionId, outcomeSlotCount);
+        require(payoutNumerators[conditionId].length == outcomeSlotCount, "condition not prepared or found");
+
+        uint fullIndexSet = (1 << outcomeSlotCount) - 1;
+
+        // Set or validate denominator
+        if (payoutDenominator[conditionId] == 0) {
+            require(denominator > 0, "denominator must be positive");
+            payoutDenominator[conditionId] = denominator;
+        } else {
+            // Denominator already set (by previous partial call). Must match.
+            // If set by reportPayouts, settledOutcomes == fullIndexSet → will fail below.
+            require(settledOutcomes[conditionId] != fullIndexSet, "condition already fully resolved");
+            require(denominator == payoutDenominator[conditionId], "denominator mismatch");
+        }
+
+        uint settled = settledOutcomes[conditionId];
+        bool anySettled = false;
+
+        for (uint i = 0; i < outcomeSlotCount; i++) {
+            if (payouts[i] == UNRESOLVED) continue;
+
+            require(settled & (1 << i) == 0, "outcome already settled");
+            payoutNumerators[conditionId][i] = payouts[i];
+            settled |= (1 << i);
+            anySettled = true;
+        }
+
+        require(anySettled, "no outcomes settled");
+        settledOutcomes[conditionId] = settled;
+
+        // Validate cumulative sum ≤ denominator
+        uint sum = 0;
+        for (uint i = 0; i < outcomeSlotCount; i++) {
+            if (settled & (1 << i) != 0) {
+                sum = sum.add(payoutNumerators[conditionId][i]);
+            }
+        }
+        require(sum <= payoutDenominator[conditionId], "cumulative payouts exceed denominator");
+
+        emit PartialConditionResolution(conditionId, msg.sender, questionId, outcomeSlotCount, settled);
+
+        // If all outcomes are now settled, also emit the full resolution event
+        if (settled == fullIndexSet) {
+            emit ConditionResolution(conditionId, msg.sender, questionId, outcomeSlotCount, payoutNumerators[conditionId]);
+        }
+    }
+
+    /// @dev Returns the bitmask of live (unresolved) outcomes for splitPosition.
+    ///      Reverts if any settled outcome has a non-zero payout (splits after positive settlements not yet supported).
+    function _getLiveIndexSet(bytes32 conditionId, uint outcomeSlotCount, uint fullIndexSet) internal view returns (uint) {
+        uint settled = settledOutcomes[conditionId];
+        if (settled == 0) return fullIndexSet;
+
+        // Verify all settled outcomes have 0 payout
+        for (uint j = 0; j < outcomeSlotCount; j++) {
+            if (settled & (1 << j) != 0) {
+                require(payoutNumerators[conditionId][j] == 0, "cannot split: non-zero settled payouts exist");
+            }
+        }
+        uint live = fullIndexSet ^ settled;
+        require(live != 0, "all outcomes already settled");
+        return live;
     }
 
     /// @dev This function splits a position. If splitting from the collateral, this contract will attempt to transfer `amount` collateral from the message sender to itself. Otherwise, this contract will burn `amount` stake held by the message sender in the position being split worth of EIP 1155 tokens. Regardless, if successful, `amount` stake will be minted in the split target positions. If any of the transfers, mints, or burns fail, the transaction will revert. The transaction will also revert if the given partition is trivial, invalid, or refers to more slots than the condition is prepared with.
@@ -115,14 +215,18 @@ contract ConditionalTokens is ERC1155 {
 
         // For a condition with 4 outcomes fullIndexSet's 0b1111; for 5 it's 0b11111...
         uint fullIndexSet = (1 << outcomeSlotCount) - 1;
-        // freeIndexSet starts as the full collection
-        uint freeIndexSet = fullIndexSet;
+        // liveIndexSet excludes settled outcomes; reverts if non-zero payouts settled
+        uint liveIndexSet = _getLiveIndexSet(conditionId, outcomeSlotCount, fullIndexSet);
+
+        // freeIndexSet starts as the live set (all unresolved outcomes)
+        uint freeIndexSet = liveIndexSet;
         // This loop checks that all condition sets are disjoint (the same outcome is not part of more than 1 set)
         uint[] memory positionIds = new uint[](partition.length);
         uint[] memory amounts = new uint[](partition.length);
         for (uint i = 0; i < partition.length; i++) {
             uint indexSet = partition[i];
             require(indexSet > 0 && indexSet < fullIndexSet, "got invalid index set");
+            // freeIndexSet already excludes settled outcomes, so this also rejects settled bits
             require((indexSet & freeIndexSet) == indexSet, "partition not disjoint");
             freeIndexSet ^= indexSet;
             positionIds[i] = CTHelpers.getPositionId(collateralToken, CTHelpers.getCollectionId(parentCollectionId, conditionId, indexSet));
@@ -130,7 +234,7 @@ contract ConditionalTokens is ERC1155 {
         }
 
         if (freeIndexSet == 0) {
-            // Partitioning the full set of outcomes for the condition in this branch
+            // Partitioning the full set of live outcomes for the condition in this branch
             if (parentCollectionId == bytes32(0)) {
                 require(collateralToken.transferFrom(msg.sender, address(this), amount), "could not receive collateral tokens");
             } else {
@@ -141,13 +245,13 @@ contract ConditionalTokens is ERC1155 {
                 );
             }
         } else {
-            // Partitioning a subset of outcomes for the condition in this branch.
+            // Partitioning a subset of live outcomes for the condition in this branch.
             // For example, for a condition with three outcomes A, B, and C, this branch
             // allows the splitting of a position $:(A|C) to positions $:(A) and $:(C).
             _burn(
                 msg.sender,
                 CTHelpers.getPositionId(collateralToken,
-                    CTHelpers.getCollectionId(parentCollectionId, conditionId, fullIndexSet ^ freeIndexSet)),
+                    CTHelpers.getCollectionId(parentCollectionId, conditionId, liveIndexSet ^ freeIndexSet)),
                 amount
             );
         }
@@ -174,7 +278,9 @@ contract ConditionalTokens is ERC1155 {
         require(outcomeSlotCount > 0, "condition not prepared yet");
 
         uint fullIndexSet = (1 << outcomeSlotCount) - 1;
-        uint freeIndexSet = fullIndexSet;
+        uint liveIndexSet = _getLiveIndexSet(conditionId, outcomeSlotCount, fullIndexSet);
+
+        uint freeIndexSet = liveIndexSet;
         uint[] memory positionIds = new uint[](partition.length);
         uint[] memory amounts = new uint[](partition.length);
         for (uint i = 0; i < partition.length; i++) {
@@ -206,7 +312,7 @@ contract ConditionalTokens is ERC1155 {
             _mint(
                 msg.sender,
                 CTHelpers.getPositionId(collateralToken,
-                    CTHelpers.getCollectionId(parentCollectionId, conditionId, fullIndexSet ^ freeIndexSet)),
+                    CTHelpers.getCollectionId(parentCollectionId, conditionId, liveIndexSet ^ freeIndexSet)),
                 amount,
                 ""
             );
@@ -221,12 +327,16 @@ contract ConditionalTokens is ERC1155 {
         uint outcomeSlotCount = payoutNumerators[conditionId].length;
         require(outcomeSlotCount > 0, "condition not prepared yet");
 
+        uint settled = settledOutcomes[conditionId];
         uint totalPayout = 0;
 
         uint fullIndexSet = (1 << outcomeSlotCount) - 1;
         for (uint i = 0; i < indexSets.length; i++) {
             uint indexSet = indexSets[i];
             require(indexSet > 0 && indexSet < fullIndexSet, "got invalid index set");
+            // All outcomes in this index set must be settled (supports partial redemption)
+            require((indexSet & settled) == indexSet, "not all outcomes in index set are settled");
+
             uint positionId = CTHelpers.getPositionId(collateralToken,
                 CTHelpers.getCollectionId(parentCollectionId, conditionId, indexSet));
 
@@ -252,6 +362,64 @@ contract ConditionalTokens is ERC1155 {
             }
         }
         emit PayoutRedemption(msg.sender, collateralToken, parentCollectionId, conditionId, indexSets, totalPayout);
+    }
+
+    // =========================================================================
+    // ERC20 wrapping
+    // =========================================================================
+
+    /// @dev Wraps ERC1155 position tokens into an ERC20 token. Deploys the ERC20 wrapper
+    ///      on first use via CREATE2 (deterministic address). The ERC1155 tokens are burned
+    ///      from `from` and the ERC20 is minted to `from`. Caller must be `from` or an
+    ///      approved operator (same trust model as safeTransferFrom).
+    /// @param from The account whose ERC1155 tokens will be wrapped.
+    /// @param positionId The ERC1155 token ID of the position to wrap.
+    /// @param amount The amount of position tokens to wrap.
+    /// @return wrapper The address of the ERC20 wrapper contract.
+    function wrap(address from, uint256 positionId, uint256 amount) external returns (address wrapper) {
+        require(
+            from == msg.sender || this.isApprovedForAll(from, msg.sender),
+            "wrap: need operator approval"
+        );
+        wrapper = _ensureWrapper(positionId);
+        _burn(from, positionId, amount);
+        _mint(wrapper, positionId, amount, abi.encode(from));
+    }
+
+    /// @dev Returns the ERC20 wrapper address for a position ID. Returns the deterministic
+    ///      CREATE2 address regardless of whether the wrapper has been deployed yet.
+    /// @param positionId The ERC1155 token ID.
+    /// @return The deterministic wrapper address.
+    function getWrappedTokenAddress(uint256 positionId) public view returns (address) {
+        bytes memory bytecode = abi.encodePacked(
+            type(WrappedPositionToken).creationCode,
+            abi.encode(address(this), positionId)
+        );
+        bytes32 hash = keccak256(abi.encodePacked(
+            bytes1(0xff),
+            address(this),
+            bytes32(positionId),
+            keccak256(bytecode)
+        ));
+        return address(uint160(uint256(hash)));
+    }
+
+    /// @dev Deploys the ERC20 wrapper for a position if it doesn't exist yet.
+    function _ensureWrapper(uint256 positionId) internal returns (address wrapper) {
+        wrapper = wrappedTokens[positionId];
+        if (wrapper != address(0)) return wrapper;
+
+        bytes memory bytecode = abi.encodePacked(
+            type(WrappedPositionToken).creationCode,
+            abi.encode(address(this), positionId)
+        );
+        bytes32 salt = bytes32(positionId);
+        assembly {
+            wrapper := create2(0, add(bytecode, 0x20), mload(bytecode), salt)
+        }
+        require(wrapper != address(0), "wrapper deployment failed");
+        wrappedTokens[positionId] = wrapper;
+        emit WrappedTokenCreated(positionId, wrapper);
     }
 
     /// @dev Gets the outcome slot count of a condition.
