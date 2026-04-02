@@ -181,7 +181,7 @@ contract ConditionalTokens is ERC1155 {
 
     /// @dev Returns the bitmask of live (unresolved) outcomes for splitPosition.
     ///      Reverts if any settled outcome has a non-zero payout (splits after positive settlements not yet supported).
-    function _getLiveIndexSetForSplit(bytes32 conditionId, uint outcomeSlotCount, uint fullIndexSet) internal view returns (uint) {
+    function _getLiveIndexSet(bytes32 conditionId, uint outcomeSlotCount, uint fullIndexSet) internal view returns (uint) {
         uint settled = settledOutcomes[conditionId];
         if (settled == 0) return fullIndexSet;
 
@@ -216,7 +216,7 @@ contract ConditionalTokens is ERC1155 {
         // For a condition with 4 outcomes fullIndexSet's 0b1111; for 5 it's 0b11111...
         uint fullIndexSet = (1 << outcomeSlotCount) - 1;
         // liveIndexSet excludes settled outcomes; reverts if non-zero payouts settled
-        uint liveIndexSet = _getLiveIndexSetForSplit(conditionId, outcomeSlotCount, fullIndexSet);
+        uint liveIndexSet = _getLiveIndexSet(conditionId, outcomeSlotCount, fullIndexSet);
 
         // freeIndexSet starts as the live set (all unresolved outcomes)
         uint freeIndexSet = liveIndexSet;
@@ -278,8 +278,7 @@ contract ConditionalTokens is ERC1155 {
         require(outcomeSlotCount > 0, "condition not prepared yet");
 
         uint fullIndexSet = (1 << outcomeSlotCount) - 1;
-        // liveIndexSet excludes settled outcomes
-        uint liveIndexSet = fullIndexSet ^ (settledOutcomes[conditionId] & fullIndexSet);
+        uint liveIndexSet = _getLiveIndexSet(conditionId, outcomeSlotCount, fullIndexSet);
 
         uint freeIndexSet = liveIndexSet;
         uint[] memory positionIds = new uint[](partition.length);
